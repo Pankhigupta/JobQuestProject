@@ -1,5 +1,5 @@
 # ==============================================================================
-# COMPLETE INDIAN JOB MARKET DASHBOARD & SALARY PREDICTOR (5-TAB APP)
+# COMPLETE INDIAN JOB MARKET DASHBOARD & SALARY PREDICTOR
 # ==============================================================================
 
 library(shiny)
@@ -15,65 +15,80 @@ library(randomForest)  # Random Forest
 library(caret)         # KNN Regression
 
 # ==============================================================================
-# PART 1: DATA LOADING & EDA / CLEANING (FROM SCRATCH)
+# PART 1: REUSABLE DATA CLEANING & FEATURE ENGINEERING FUNCTION
 # ==============================================================================
-print("Step 1: Loading and cleaning dataset...")
+top_cities <- c("Bengaluru", "Hyderabad", "Pune", "Mumbai", "Chennai", "Gurugram", "Noida", "Delhi NCR")
 
-raw_data <- read_excel("indian-job-market-dataset-2025.xlsx")
+clean_and_engineer <- function(raw_df) {
+  raw_df %>%
+    distinct(jobId, .keep_all = TRUE) %>%
+    select(
+      title, companyName, tagsAndSkills, experience, salary, location,
+      currency, minimumSalary, maximumSalary, minimumExperience, maximumExperience
+    ) %>%
+    mutate(
+      # Convert experience & salary columns to numeric
+      minimumExperience = suppressWarnings(as.numeric(minimumExperience)),
+      maximumExperience = suppressWarnings(as.numeric(maximumExperience)),
+      minimumSalary     = suppressWarnings(as.numeric(minimumSalary)),
+      maximumSalary     = suppressWarnings(as.numeric(maximumSalary)),
+      
+      # Average experience
+      mid_exp = (minimumExperience + maximumExperience) / 2,
+      
+      # Experience tiers
+      exp_group = case_when(
+        minimumExperience <= 1 ~ "0-1 Yrs (Fresher)",
+        minimumExperience <= 4 ~ "2-4 Yrs (Junior)",
+        minimumExperience <= 9 ~ "5-9 Yrs (Mid-Senior)",
+        minimumExperience >= 10 ~ "10+ Yrs (Senior)",
+        TRUE ~ "Not Specified"
+      ),
+      
+      # Valid disclosed INR salary flag
+      valid_salary = (currency == "INR" & !is.na(minimumSalary) & minimumSalary > 0),
+      
+      # Convert salary to Lakhs Per Annum (LPA)
+      min_sal_lpa = ifelse(valid_salary, minimumSalary / 100000, NA),
+      max_sal_lpa = ifelse(valid_salary, maximumSalary / 100000, NA),
+      mid_sal_lpa = ifelse(valid_salary, (min_sal_lpa + max_sal_lpa) / 2, NA),
+      
+      # Clean primary city name
+      city = str_split_fixed(location, ",", 2)[, 1],
+      city = str_remove(city, "Hybrid - "),
+      city = str_remove(city, "\\(.*\\)"),
+      city = str_trim(city),
+      city = ifelse(city %in% c("Delhi / NCR", "New Delhi", "Delhi"), "Delhi NCR", city),
+      city = ifelse(city %in% c("Bangalore", "Bangalore Rural"), "Bengaluru", city),
+      city = ifelse(city %in% c("Mumbai Suburban", "Navi Mumbai"), "Mumbai", city),
+      city_clean = ifelse(city %in% top_cities, city, "Other City"),
+      
+      # Job category from keywords
+      text_lower = tolower(paste(title, tagsAndSkills)),
+      category = case_when(
+        str_detect(text_lower, "software|developer|engineer|java|python|data|cloud|sql|testing|ai") ~ "IT & Software",
+        str_detect(text_lower, "sales|business development|bde|bdm|marketing") ~ "Sales & Marketing",
+        str_detect(text_lower, "bank|finance|accountant|audit|loan|credit") ~ "Finance & Banking",
+        str_detect(text_lower, "hr|human resource|recruiter|talent") ~ "HR & Recruitment",
+        str_detect(text_lower, "customer|bpo|support|voice|operations") ~ "Operations & BPO",
+        TRUE ~ "Other"
+      ),
+      
+      # Binary tech skill indicator (1 = Yes, 0 = No)
+      is_tech = ifelse(str_detect(text_lower, "python|java|aws|azure|react|sql|sap|machine learning|c\\+\\+"), 1, 0)
+    ) %>%
+    select(-text_lower)
+}
 
-# Remove duplicate jobs and drop unnecessary columns
-jobs <- raw_data %>%
-  distinct(jobId, .keep_all = TRUE) %>%
-  select(
-    title, companyName, tagsAndSkills, experience, salary, location,
-    currency, minimumSalary, maximumSalary, minimumExperience, maximumExperience
-  )
+print("Step 1: Loading and preprocessing BOTH datasets...")
 
-# Clean columns and create useful features
-jobs <- jobs %>%
-  mutate(
-    minimumExperience = suppressWarnings(as.numeric(minimumExperience)),
-    maximumExperience = suppressWarnings(as.numeric(maximumExperience)),
-    minimumSalary     = suppressWarnings(as.numeric(minimumSalary)),
-    maximumSalary     = suppressWarnings(as.numeric(maximumSalary)),
-    
-    mid_exp = (minimumExperience + maximumExperience) / 2,
-    
-    exp_group = case_when(
-      minimumExperience <= 1 ~ "0-1 Yrs (Fresher)",
-      minimumExperience <= 4 ~ "2-4 Yrs (Junior)",
-      minimumExperience <= 9 ~ "5-9 Yrs (Mid-Senior)",
-      minimumExperience >= 10 ~ "10+ Yrs (Senior)",
-      TRUE ~ "Not Specified"
-    ),
-    
-    valid_salary = (currency == "INR" & !is.na(minimumSalary) & minimumSalary > 0),
-    
-    min_sal_lpa = ifelse(valid_salary, minimumSalary / 100000, NA),
-    max_sal_lpa = ifelse(valid_salary, maximumSalary / 100000, NA),
-    mid_sal_lpa = ifelse(valid_salary, (min_sal_lpa + max_sal_lpa) / 2, NA),
-    
-    city = str_split_fixed(location, ",", 2)[, 1],
-    city = str_remove(city, "Hybrid - "),
-    city = str_remove(city, "\\(.*\\)"),
-    city = str_trim(city),
-    city = ifelse(city %in% c("Delhi / NCR", "New Delhi", "Delhi"), "Delhi NCR", city),
-    city = ifelse(city %in% c("Bangalore", "Bangalore Rural"), "Bengaluru", city),
-    city = ifelse(city %in% c("Mumbai Suburban", "Navi Mumbai"), "Mumbai", city),
-    
-    text_lower = tolower(paste(title, tagsAndSkills)),
-    category = case_when(
-      str_detect(text_lower, "software|developer|engineer|java|python|data|cloud|sql|testing|ai") ~ "IT & Software",
-      str_detect(text_lower, "sales|business development|bde|bdm|marketing") ~ "Sales & Marketing",
-      str_detect(text_lower, "bank|finance|accountant|audit|loan|credit") ~ "Finance & Banking",
-      str_detect(text_lower, "hr|human resource|recruiter|talent") ~ "HR & Recruitment",
-      str_detect(text_lower, "customer|bpo|support|voice|operations") ~ "Operations & BPO",
-      TRUE ~ "Other"
-    ),
-    
-    is_tech = ifelse(str_detect(text_lower, "python|java|aws|azure|react|sql|sap|machine learning|c\\+\\+"), 1, 0)
-  ) %>%
-  select(-text_lower)
+# Load and clean Dataset 1 (Original Training Dataset)
+raw_train_file <- read_excel("indian-job-market-dataset-2025.xlsx")
+jobs <- clean_and_engineer(raw_train_file)
+
+# Load and clean Dataset 2 (Unpreprocessed External Test Dataset)
+raw_external_file <- read_excel("indian-job-market-synthetic-test-2025.xlsx")
+external_jobs <- clean_and_engineer(raw_external_file)
 
 # ==============================================================================
 # PART 2: GEOSPATIAL DATA PREPARATION (INDIAN CITIES)
@@ -104,44 +119,43 @@ map_data <- jobs %>%
   inner_join(city_coords, by = "city")
 
 # ==============================================================================
-# PART 3: MACHINE LEARNING - TRAIN & COMPARE 4 SALARY PREDICTION MODELS
+# PART 3: MACHINE LEARNING - TRAIN ON 80% DATASET 1, TEST ON BOTH DATASETS
 # ==============================================================================
-print("Step 3: Training ML models for salary prediction...")
+print("Step 3: Training 4 ML models on 80% of Dataset 1...")
 
-top_cities <- c("Bengaluru", "Hyderabad", "Pune", "Mumbai", "Chennai", "Gurugram", "Noida", "Delhi NCR")
-
-ml_data <- jobs %>%
+# Prepare modeling dataset from Dataset 1
+ml_data_1 <- jobs %>%
   filter(valid_salary == TRUE, !is.na(mid_exp), mid_exp >= 0, mid_exp <= 25, mid_sal_lpa <= 60) %>%
   mutate(
-    city_clean = ifelse(city %in% top_cities, city, "Other City"),
     city_clean = as.factor(city_clean),
-    category = as.factor(category)
+    category   = as.factor(category)
   ) %>%
   select(mid_sal_lpa, mid_exp, city_clean, category, is_tech)
 
+# Sample 5,000 rows so training stays fast, then split 80% Train / 20% Test
 set.seed(123)
-ml_sample <- ml_data %>% sample_n(min(5000, nrow(ml_data)))
+ml_sample <- ml_data_1 %>% sample_n(min(5000, nrow(ml_data_1)))
 
 train_index <- sample(1:nrow(ml_sample), 0.8 * nrow(ml_sample))
-train_df <- ml_sample[train_index, ]
-test_df  <- ml_sample[-train_index, ]
+train_df    <- ml_sample[train_index, ]
+test_df_20  <- ml_sample[-train_index, ]
 
-# 1. Linear Regression (Best Model - used in Tab 3 Predictor)
-model_lm <- lm(mid_sal_lpa ~ mid_exp + city_clean + category + is_tech, data = train_df)
-pred_lm  <- predict(model_lm, newdata = test_df)
+# Prepare External Test Dataset (Dataset 2) with exact same factor levels (NO retraining)
+external_test_df <- external_jobs %>%
+  filter(valid_salary == TRUE, !is.na(mid_exp), mid_exp >= 0, mid_exp <= 25, mid_sal_lpa <= 60) %>%
+  mutate(
+    city_clean = factor(city_clean, levels = levels(train_df$city_clean)),
+    category   = factor(category, levels = levels(train_df$category))
+  ) %>%
+  select(mid_sal_lpa, mid_exp, city_clean, category, is_tech)
 
-# 2. Decision Tree
-model_dt <- rpart(mid_sal_lpa ~ mid_exp + city_clean + category + is_tech, data = train_df)
-pred_dt  <- predict(model_dt, newdata = test_df)
-
-# 3. Random Forest
-model_rf <- randomForest(mid_sal_lpa ~ mid_exp + city_clean + category + is_tech, data = train_df, ntree = 100)
-pred_rf  <- predict(model_rf, newdata = test_df)
-
-# 4. K-Nearest Neighbors (KNN)
+# Train all 4 models on 80% training data ONLY
+model_lm  <- lm(mid_sal_lpa ~ mid_exp + city_clean + category + is_tech, data = train_df)
+model_dt  <- rpart(mid_sal_lpa ~ mid_exp + city_clean + category + is_tech, data = train_df)
+model_rf  <- randomForest(mid_sal_lpa ~ mid_exp + city_clean + category + is_tech, data = train_df, ntree = 100)
 model_knn <- knnreg(mid_sal_lpa ~ mid_exp + city_clean + category + is_tech, data = train_df, k = 15)
-pred_knn  <- predict(model_knn, newdata = test_df)
 
+# Helper function to compute evaluation metrics
 calc_metrics <- function(actual, predicted) {
   rmse <- sqrt(mean((actual - predicted)^2))
   mae  <- mean(abs(actual - predicted))
@@ -149,15 +163,31 @@ calc_metrics <- function(actual, predicted) {
   return(c(RMSE = round(rmse, 2), MAE = round(mae, 2), R2 = round(r2, 3)))
 }
 
-model_comparison <- rbind(
-  "Linear Regression (Best)" = calc_metrics(test_df$mid_sal_lpa, pred_lm),
-  "Decision Tree"            = calc_metrics(test_df$mid_sal_lpa, pred_dt),
-  "Random Forest"            = calc_metrics(test_df$mid_sal_lpa, pred_rf),
-  "KNN (k = 15)"             = calc_metrics(test_df$mid_sal_lpa, pred_knn)
+# --- Evaluation 1: 20% Holdout Split of Dataset 1 ---
+metrics_split <- rbind(
+  "Linear Regression" = calc_metrics(test_df_20$mid_sal_lpa, predict(model_lm,  newdata = test_df_20)),
+  "Decision Tree"     = calc_metrics(test_df_20$mid_sal_lpa, predict(model_dt,  newdata = test_df_20)),
+  "Random Forest"     = calc_metrics(test_df_20$mid_sal_lpa, predict(model_rf,  newdata = test_df_20)),
+  "KNN (k = 15)"      = calc_metrics(test_df_20$mid_sal_lpa, predict(model_knn, newdata = test_df_20))
 ) %>% as.data.frame()
+metrics_split$Model <- rownames(metrics_split)
+metrics_split <- metrics_split %>% select(Model, RMSE, MAE, R2)
 
-model_comparison$Model <- rownames(model_comparison)
-model_comparison <- model_comparison %>% select(Model, RMSE, MAE, R2)
+# --- Evaluation 2: External Test Dataset (Dataset 2, Unseen) ---
+metrics_external <- rbind(
+  "Linear Regression" = calc_metrics(external_test_df$mid_sal_lpa, predict(model_lm,  newdata = external_test_df)),
+  "Decision Tree"     = calc_metrics(external_test_df$mid_sal_lpa, predict(model_dt,  newdata = external_test_df)),
+  "Random Forest"     = calc_metrics(external_test_df$mid_sal_lpa, predict(model_rf,  newdata = external_test_df)),
+  "KNN (k = 15)"      = calc_metrics(external_test_df$mid_sal_lpa, predict(model_knn, newdata = external_test_df))
+) %>% as.data.frame()
+metrics_external$Model <- rownames(metrics_external)
+metrics_external <- metrics_external %>% select(Model, RMSE, MAE, R2)
+
+# Combined table for grouped bar charts
+combined_comparison <- bind_rows(
+  metrics_split %>% mutate(Dataset = "1. Original Split (20% Test)"),
+  metrics_external %>% mutate(Dataset = "2. External Test Dataset")
+)
 
 # ==============================================================================
 # PART 4: COLORFUL SHINY USER INTERFACE (UI)
@@ -197,7 +227,7 @@ ui <- fluidPage(
   # Gradient Banner Header
   div(class = "main-header",
       h2("Indian Job Market Intelligence & Salary Predictor (2025)"),
-      p("Interactive Geospatial Analytics, Compensation Trends & Machine Learning")
+      p("Interactive Geospatial Analytics, Compensation Trends & Out-of-Sample ML Evaluation")
   ),
   
   sidebarLayout(
@@ -291,7 +321,7 @@ ui <- fluidPage(
                        radioButtons("user_tech", "Core Tech Skills (Python/Java/Cloud/SQL)?",
                                     choices = c("Yes" = 1, "No" = 0), selected = 1, inline = TRUE),
                        hr(),
-                       p("Powered by Multiple Linear Regression (Best performing model in evaluation).", style = "color:#555; font-size:12px;")
+                       p("Powered by Multiple Linear Regression trained on Dataset 1.", style = "color:#555; font-size:12px;")
                    )
             ),
             column(8,
@@ -311,23 +341,28 @@ ui <- fluidPage(
         ),
         
         # ----------------------------------------------------------------------
-        # TAB 4: ML MODEL COMPARISON (ALL 4 MODELS)
+        # TAB 4: ML MODEL COMPARISON (20% HOLDOUT VS EXTERNAL DATASET)
         # ----------------------------------------------------------------------
         tabPanel(
           "4. ML Model Comparison",
           br(),
-          div(class = "chart-card",
-              h4("Model Performance Metrics (Evaluated on 20% Unseen Test Data)", style = "color:#1e3c72; font-weight:700;"),
-              p("RMSE & MAE measure prediction error in Lakhs Per Annum (Lower is Better). R² measures variance explained (Higher is Better)."),
-              tableOutput("table_metrics")
+          fluidRow(
+            column(6, div(class = "chart-card",
+                          h4("Test Set A: 20% Holdout Split (Original Dataset)", style = "color:#1e3c72; font-weight:700;"),
+                          p("Evaluated on 20% unseen rows from Dataset 1."),
+                          tableOutput("table_metrics_split"))),
+            column(6, div(class = "chart-card",
+                          h4("Test Set B: Separate External Dataset (No Retraining)", style = "color:#11998e; font-weight:700;"),
+                          p(paste0("Evaluated on ", nrow(external_test_df), " feature-engineered rows from Dataset 2.")),
+                          tableOutput("table_metrics_ext")))
           ),
           fluidRow(
             column(6, div(class = "chart-card",
-                          h4("Error Comparison: RMSE & MAE (Lower is Better)", style = "color:#ee0979;"),
-                          plotlyOutput("plot_model_error", height = 340))),
+                          h4("RMSE Comparison Across Both Test Sets (Lower is Better)", style = "color:#ee0979;"),
+                          plotlyOutput("plot_compare_rmse", height = 340))),
             column(6, div(class = "chart-card",
-                          h4("Accuracy Score: R-Squared (Higher is Better)", style = "color:#11998e;"),
-                          plotlyOutput("plot_model_r2", height = 340)))
+                          h4("R-Squared Comparison Across Both Test Sets (Higher is Better)", style = "color:#11998e;"),
+                          plotlyOutput("plot_compare_r2", height = 340)))
           )
         ),
         
@@ -379,7 +414,7 @@ server <- function(input, output) {
     if (length(top_c) == 0) "N/A" else top_c
   })
   
-  # TAB 1: Geospatial Map (Using free OpenStreetMap tiles - no API key needed!)
+  # TAB 1: Geospatial Map (OpenStreetMap - no API key needed)
   output$india_map <- renderLeaflet({
     df_map <- map_data
     if (input$city_filter != "All") {
@@ -469,7 +504,7 @@ server <- function(input, output) {
     )
   })
   
-  lm_mae <- model_comparison$MAE[1]
+  lm_mae <- metrics_split$MAE[1]
   
   output$out_lm <- renderText({
     val <- max(1.0, round(predict(model_lm, new_input()), 2))
@@ -508,20 +543,20 @@ server <- function(input, output) {
       layout(xaxis = list(title = "Years of Experience"), yaxis = list(title = "Predicted Salary (LPA)"))
   })
   
-  # TAB 4: Model Comparison Table & Charts
-  output$table_metrics <- renderTable({ model_comparison }, striped = TRUE, hover = TRUE, bordered = TRUE)
+  # TAB 4: Model Comparison Tables & Grouped Charts (20% Split vs External Dataset)
+  output$table_metrics_split <- renderTable({ metrics_split }, striped = TRUE, hover = TRUE, bordered = TRUE)
+  output$table_metrics_ext   <- renderTable({ metrics_external }, striped = TRUE, hover = TRUE, bordered = TRUE)
   
-  output$plot_model_error <- renderPlotly({
-    plot_ly(model_comparison, x = ~Model) %>%
-      add_bars(y = ~RMSE, name = "RMSE (LPA)", marker = list(color = "#ee0979")) %>%
-      add_bars(y = ~MAE, name = "MAE (LPA)", marker = list(color = "#f7971e")) %>%
-      layout(barmode = "group", xaxis = list(title = ""), yaxis = list(title = "Error (in LPA)"))
+  output$plot_compare_rmse <- renderPlotly({
+    plot_ly(combined_comparison, x = ~Model, y = ~RMSE, color = ~Dataset,
+            colors = c("#2a5298", "#ee0979"), type = "bar") %>%
+      layout(barmode = "group", xaxis = list(title = ""), yaxis = list(title = "RMSE (in LPA)"))
   })
   
-  output$plot_model_r2 <- renderPlotly({
-    plot_ly(model_comparison, x = ~Model, y = ~R2, type = "bar",
-            marker = list(color = c("#2193b0", "#cc2b5e", "#00b09b", "#f7971e"))) %>%
-      layout(xaxis = list(title = ""), yaxis = list(title = "R² Score (0 to 1)", range = c(0, 1)))
+  output$plot_compare_r2 <- renderPlotly({
+    plot_ly(combined_comparison, x = ~Model, y = ~R2, color = ~Dataset,
+            colors = c("#11998e", "#f7971e"), type = "bar") %>%
+      layout(barmode = "group", xaxis = list(title = ""), yaxis = list(title = "R² Score (0 to 1)", range = c(0, 1)))
   })
   
   # TAB 5: Interactive Data Table
